@@ -58,6 +58,17 @@ const responseSchema = {
   },
 };
 
+// Filtro para elegir el mejor documento (el de referencia principal)
+function selectBestDocument(sources) {
+  const withEvidence = sources.filter(s => s.evidence && s.evidence.length > 50);
+  const peerReviewed = withEvidence.filter(s => s.peerReviewed || s.provider === "Fuente institucional");
+  
+  if (peerReviewed.length > 0) return peerReviewed[0];
+  if (withEvidence.length > 0) return withEvidence[0];
+  
+  return sources[0];
+}
+
 function validatePlan(plan, topic, ageRange) {
   const allowed = new Set(topic.sources.map((source) => source.id));
   const expectedAge =
@@ -83,13 +94,36 @@ function validatePlan(plan, topic, ageRange) {
   return plan;
 }
 
+// --- NUEVA FUNCIÓN: Reglas estrictas de lenguaje según la edad ---
+function getAgeInstructions(age) {
+  if (age === "6–9") {
+    return "Tono MUY infantil y amigable (niños de primaria). Usa metáforas simples, ejemplos de la vida cotidiana, palabras básicas y oraciones muy cortas. Evita por completo la jerga técnica. Explícalo como si fuera un cuento o una curiosidad divertida.";
+  }
+  if (age === "10–13") {
+    return "Tono para preadolescentes. Lenguaje claro, dinámico y curioso. Explica la información de forma sencilla sin tratar al usuario como un niño pequeño, manteniendo oraciones fáciles de digerir pero informativas.";
+  }
+  if (age === "14–17") {
+    return "Tono juvenil/pre-universitario. Analítico, objetivo y estructurado. Introduce términos técnicos reales del documento base, pero dales contexto para que sean comprensibles.";
+  }
+  // Para 18-30 y 31+
+  return "Tono adulto, puramente académico y altamente formal. Usa lenguaje técnico, rigor científico y sintaxis compleja. El resumen debe leerse como el abstract de un artículo de investigación o un reporte ejecutivo.";
+}
+
 async function adaptWithGemini({ query, ageRange, topic, runtimeEnv }) {
   const apiKey = runtimeEnv.GEMINI_API_KEY;
   if (!apiKey) throw new Error("missing_api_key");
+  
+  const bestDoc = topic.bestDocument;
+  const ageInstructions = getAgeInstructions(ageRange);
+
   const packet = {
     title: topic.title,
     evidencePolicy:
       "Cada afirmación debe proceder de los extractos siguientes. Los metadatos sin extracto no están incluidos.",
+    bestDocumentRef: {
+      id: bestDoc.id,
+      title: bestDoc.title
+    },
     sources: topic.sources.map((source) => ({
       id: source.id,
       institution: source.institution,
@@ -100,7 +134,27 @@ async function adaptWithGemini({ query, ageRange, topic, runtimeEnv }) {
       evidenceExcerpt: source.evidence,
     })),
   };
-  const prompt = `Actúa como un único diseñador educativo. Transforma EXCLUSIVAMENTE el contenido verificado en un plan visual. No agregues hechos, cifras, fechas ni recomendaciones ausentes. Elige el formato pedagógico más adecuado. Para 6-9 usa máximo 3 bloques, frases muy cortas y palabras concretas para buscar pictogramas ARASAAC. Para 10-13 usa tarjetas y relaciones simples. Para 14-17 usa diagramas, comparaciones o miniinfografías. Para 18+ usa texto estructurado y gráficos solo como organización, nunca como datos inventados. Cada bloque cita únicamente IDs recibidos.\nConsulta: ${query}\nEdad: ${ageRange}\nPaquete verificado: ${JSON.stringify(packet)}`;
+
+  // --- PROMPT MODIFICADO PARA FORZAR LA EDAD EN EL RESUMEN ---
+  const prompt = `Actúa como un diseñador educativo experto. Transforma EXCLUSIVAMENTE el contenido verificado en un plan educativo. No inventes datos.
+
+IMPORTANTE - DOCUMENTO BASE PARA EL RESUMEN:
+Utiliza principalmente la evidencia de este documento para redactar el campo 'summary':
+- Título: "${bestDoc.title}" (ID: ${bestDoc.id})
+
+REGLAS ESTRICTAS DE REDACCIÓN PARA LA EDAD (${ageRange}):
+Para el campo 'summary' y los 'blocks', DEBES aplicar OBLIGATORIAMENTE este estilo:
+>>> ${ageInstructions} <<<
+
+Tu tarea:
+1. En el campo 'summary', redacta el resumen del documento principal aplicando AL MÁXIMO las reglas de redacción de edad. El tono debe ser inconfundible para ese grupo demográfico.
+2. En los 'blocks', completa con las demás fuentes enriqueciendo el contenido, respetando el mismo nivel de complejidad del usuario.
+3. Elige el formato pedagógico adecuado según la edad. Cada bloque cita únicamente IDs recibidos.
+
+Consulta: ${query}
+Edad: ${ageRange}
+Paquete verificado: ${JSON.stringify(packet)}`;
+
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
     {
@@ -109,20 +163,23 @@ async function adaptWithGemini({ query, ageRange, topic, runtimeEnv }) {
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.15,
+          temperature: 0.15, // Mantenemos baja la temperatura para evitar alucinaciones
           responseMimeType: "application/json",
           responseSchema,
         },
       }),
     },
   );
+  
   if (!response.ok) {
     console.error("Gemini API error", response.status);
     throw new Error(`gemini_${response.status}`);
   }
+  
   const data = await response.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("empty_model_response");
+  
   return validatePlan(JSON.parse(text), topic, ageRange);
 }
 
@@ -157,12 +214,17 @@ async function buildResearchPacket(query, runtimeEnv) {
     ...curatedEvidence,
     ...academic.evidence,
   ]).slice(0, 7);
+  
   if (evidence.length < 2) return null;
+
+  const bestDocument = selectBestDocument(evidence);
+
   return {
     topic: {
       id: curated?.id || `research-${Date.now()}`,
       title: curated?.title || query,
       sources: evidence,
+      bestDocument 
     },
     sources: uniqueSources([...evidence, ...academic.readings]).slice(0, 12),
     news,
@@ -213,6 +275,7 @@ export async function handleAdapt(body, runtimeEnv = process.env) {
       status: 200,
       body: {
         plan,
+        bestDocumentId: research.topic.bestDocument.id,
         sources: research.sources.map(({ evidence, ...source }) => source),
         news: research.news,
         providerStatus: research.providerStatus,

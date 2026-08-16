@@ -877,22 +877,31 @@ function AgentPlan({ plan, age }) {
     </section>
   );
 }
+
 function Dashboard({ profile, onReset }) {
-  const [query, setQuery] = useState("¿Qué es el cambio climático?");
-  const [topic, setTopic] = useState("cambio climático");
-  const [searched, setSearched] = useState(true);
+  // 1. Iniciamos los estados vacíos y `searched` en false para que empiece en limpio
+  const [query, setQuery] = useState("");
+  const [topic, setTopic] = useState("");
+  const [searched, setSearched] = useState(false);
   const [age, setAge] = useState(profile.age);
   const [plan, setPlan] = useState(null);
   const [verifiedSources, setVerifiedSources] = useState(null);
   const [currentNews, setCurrentNews] = useState([]);
-  const [agentStatus, setAgentStatus] = useState("loading");
+  const [agentStatus, setAgentStatus] = useState("idle");
   const [agentError, setAgentError] = useState("");
   const content = ANSWERS[age];
+
   useEffect(() => {
+    // 2. Si no hay tema (topic está vacío), no disparamos la petición a la API
+    if (!topic) return;
+
     const controller = new AbortController();
     async function adapt() {
       setAgentStatus("loading");
       setAgentError("");
+      setPlan(null); // Limpiamos la información anterior
+      setVerifiedSources(null);
+      setCurrentNews([]);
       try {
         const response = await fetch("/api/adapt", {
           method: "POST",
@@ -921,6 +930,7 @@ function Dashboard({ profile, onReset }) {
     adapt();
     return () => controller.abort();
   }, [age, topic]);
+
   return (
     <>
       <header className="topbar">
@@ -958,8 +968,10 @@ function Dashboard({ profile, onReset }) {
             onSubmit={(e) => {
               e.preventDefault();
               const nextTopic = query.trim();
-              setSearched(Boolean(nextTopic));
-              if (nextTopic) setTopic(nextTopic);
+              if (nextTopic) {
+                setSearched(true);
+                setTopic(nextTopic);
+              }
             }}
           >
             <Search />
@@ -967,6 +979,7 @@ function Dashboard({ profile, onReset }) {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               aria-label="Tema o pregunta"
+              placeholder="Ej. ¿Qué son los agujeros negros?"
             />
             <button>Buscar</button>
           </form>
@@ -987,53 +1000,58 @@ function Dashboard({ profile, onReset }) {
                   Infomorph adapta, no decide la verdad.
                 </span>
               </header>
-              <div className="answer-body">
-                <p className="lead">
-                  {plan?.summary ||
-                    (agentStatus === "sources-only"
-                      ? `Encontramos fuentes académicas sobre “${topic}”. Puedes abrirlas y contrastarlas mientras se restablece la adaptación por edad.`
-                      : content.lead)}
-                </p>
-                {!plan && agentStatus === "fallback"
-                  ? content.body.map((p) => <p key={p}>{p}</p>)
-                  : null}
-                {agentStatus !== "sources-only" ? (
-                  <div className="critical">
-                    <Sparkles />
-                    <span>
-                      {plan
-                        ? "Compara la explicación con las noticias recientes y revisa cuáles fuentes sostienen cada afirmación."
-                        : content.example}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-              <CurrentNews items={currentNews} />
+
+              {/* 3. Renderizado condicionado: solo muestra la animación de carga mientras procesa */}
               {agentStatus === "loading" ? (
-                <div className="agent-loading">
+                <div className="agent-loading" style={{ margin: "40px 26px", padding: "40px 22px" }}>
                   <span />
                   <span />
                   <span />
-                  <p>
-                    El diseñador educativo está preparando la mejor
-                    representación…
+                  <p style={{ fontSize: "1rem", marginTop: "20px" }}>
+                    Investigando, extrayendo fuentes y adaptando la información sobre "{topic}"...
                   </p>
                 </div>
-              ) : null}
-              {plan ? (
-                <AgentPlan plan={plan} age={age} />
-              ) : agentStatus === "fallback" ? (
-                <VisualExplorer age={age} topic={topic} />
-              ) : null}
-              {agentError ? (
-                <p className="agent-error">
-                  {agentError}
-                  {agentStatus === "fallback"
-                    ? " Se muestra la adaptación local."
-                    : ""}
-                </p>
-              ) : null}
-              <Sources items={verifiedSources || SOURCES} />
+              ) : (
+                /* Cuando ya no está en "loading", revelamos TODO el contenido de golpe */
+                <>
+                  <div className="answer-body">
+                    <p className="lead">
+                      {plan?.summary ||
+                        (agentStatus === "sources-only"
+                          ? `Encontramos fuentes académicas sobre “${topic}”. Puedes abrirlas y contrastarlas mientras se restablece la adaptación por edad.`
+                          : content.lead)}
+                    </p>
+                    {!plan && agentStatus === "fallback"
+                      ? content.body.map((p) => <p key={p}>{p}</p>)
+                      : null}
+                    {agentStatus !== "sources-only" ? (
+                      <div className="critical">
+                        <Sparkles />
+                        <span>
+                          {plan
+                            ? "Compara la explicación con las noticias recientes y revisa cuáles fuentes sostienen cada afirmación."
+                            : content.example}
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+                  <CurrentNews items={currentNews} />
+                  {plan ? (
+                    <AgentPlan plan={plan} age={age} />
+                  ) : agentStatus === "fallback" ? (
+                    <VisualExplorer age={age} topic={topic} />
+                  ) : null}
+                  {agentError ? (
+                    <p className="agent-error">
+                      {agentError}
+                      {agentStatus === "fallback"
+                        ? " Se muestra la adaptación local."
+                        : ""}
+                    </p>
+                  ) : null}
+                  <Sources items={verifiedSources || SOURCES} />
+                </>
+              )}
             </article>
           ) : (
             <div className="empty">
@@ -1049,6 +1067,7 @@ function Dashboard({ profile, onReset }) {
     </>
   );
 }
+
 function App() {
   const [profile, setProfile] = useState(null);
   return profile ? (
